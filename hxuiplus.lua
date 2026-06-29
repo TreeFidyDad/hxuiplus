@@ -990,6 +990,7 @@ ashita.events.register('packet_in', 'packet_in_cb', function (e)
 			end
 
 			debuffHandler.HandleActionPacket(actionPacket);
+			partyList.HandleActionPacket(actionPacket);
 		end
 	elseif (e.id == 0x00E) then
 		local mobUpdatePacket = ParseMobUpdatePacket(e);

@@ -82,6 +82,35 @@ local function GetSelfRegenSeconds()
     return secs;
 end
 
+-- REGEN CAST TRACKER (party bars) -----------------------------------
+-- Other party members expose only the Regen *icon*, not its time left,
+-- so we watch the action-packet stream for any Regen cast (by anyone,
+-- on anyone) and remember when it should expire. Combined with the
+-- per-member learned tick rate, this lets the ghost show the FULL
+-- remaining heal for EVERY member who has Regen -- not just yourself.
+local regenCast          = {};    -- [serverid] = expiry (os.time seconds)
+local REGEN_BASE_SECONDS = 60;    -- 75-era base Regen duration
+local COMPOSURE_STATUS_ID = 419;  -- tripled Regen duration on the caster
+local function SpellIsRegen(spellId)
+    if spellId == nil or spellId == 0 then return false; end
+    local name = nil;
+    pcall(function()
+        local s = AshitaCore:GetResourceManager():GetSpellById(spellId);
+        if s ~= nil then name = s.Name[1]; end
+    end);
+    if name == nil then return false; end
+    return name:find('Regen') ~= nil;
+end
+-- Remaining seconds of a tracked Regen cast for a server id, or nil.
+local function GetTrackedRegenSeconds(serverid)
+    if serverid == nil then return nil; end
+    local expiry = regenCast[serverid];
+    if expiry == nil then return nil; end
+    local left = expiry - os.time();
+    if left <= 0 then regenCast[serverid] = nil; return nil; end
+    return left;
+end
+
 -- local backgroundPrim = {};
 local partyWindowPrim = {};
 partyWindowPrim[1] = {
@@ -566,14 +595,19 @@ local function DrawMember(memIdx, settings)
                         local ticks  = REGEN_GHOST_TICKS
                         local secs   = nil
                         if memIdx == 0 then
+                            -- Self: exact remaining time from the buff timer.
                             secs = GetSelfRegenSeconds()
-                            if secs == -1 then
-                                secs = nil -- infinite/unknown, keep fallback
-                            elseif secs and secs > 0 then
-                                ticks = math.max(1, math.floor(secs / REGEN_TICK_SECONDS + 0.5))
-                            elseif secs == 0 then
-                                ticks = 0
-                            end
+                            if secs == -1 then secs = nil end
+                        end
+                        if secs == nil then
+                            -- Anyone else (or self fallback): use the Regen
+                            -- cast we caught from the action-packet stream.
+                            secs = GetTrackedRegenSeconds(key)
+                        end
+                        if secs and secs > 0 then
+                            ticks = math.max(1, math.floor(secs / REGEN_TICK_SECONDS + 0.5))
+                        elseif secs == 0 then
+                            ticks = 0
                         end
 
                         if ticks > 0 then
@@ -594,7 +628,7 @@ local function DrawMember(memIdx, settings)
                                     { end_x, hpStartY + barHeight - inset },
                                     imgui.GetColorU32({ 0.55, 1.00, 0.60, 0.85 }), 1.5)
                                 local label
-                                if memIdx == 0 and secs and secs > 0 then
+                                if secs and secs > 0 then
                                     label = ('R+%d  %ds'):format(math.floor(capped + 0.5), secs)
                                 else
                                     label = ('R+%d'):format(math.floor(capped + 0.5))
@@ -1315,8 +1349,37 @@ partyList.SetHidden = function(hidden)
 	end
 end
 
+-- Watch the action-packet stream for Regen casts (any caster, any
+-- target) so every party member's ghost can show the full remaining
+-- heal, not just self. Wired up from hxuiplus.lua's packet handler.
+partyList.HandleActionPacket = function(actionPacket)
+    if actionPacket == nil then return; end
+    -- Magic cast completion is action type 4; Param holds the spell id.
+    if actionPacket.Type ~= 4 then return; end
+    if not SpellIsRegen(actionPacket.Param) then return; end
+
+    -- Composure on the caster triples Regen's duration.
+    local dur = REGEN_BASE_SECONDS;
+    pcall(function()
+        local cb = statusHandler.get_member_status(actionPacket.UserId);
+        if cb ~= nil then
+            for i = 0, 32 do
+                if cb[i] == COMPOSURE_STATUS_ID then dur = dur * 3; break; end
+            end
+        end
+    end);
+
+    local now = os.time();
+    for _, target in pairs(actionPacket.Targets) do
+        if target.Id ~= nil and target.Id > 0 then
+            regenCast[target.Id] = now + dur;
+        end
+    end
+end
+
 partyList.HandleZonePacket = function(e)
     statusHandler.clear_cache();
+    regenCast = {};
 end
 
 return partyList;
