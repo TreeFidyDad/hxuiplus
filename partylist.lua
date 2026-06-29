@@ -111,6 +111,70 @@ local function GetTrackedRegenSeconds(serverid)
     return left;
 end
 
+-- Per-frame: learn this member's regen tick rate and project the FULL
+-- HP regen will restore over its remaining duration. Returns
+--   addHp  - capped HP regen will add before topping off (0 if none)
+--   secs   - remaining seconds (number, or nil if unknown)
+-- Must be called once per member per frame (it drives rate learning).
+local function ComputeRegenProjection(memIdx, memInfo)
+    local hp_cur = memInfo.hp or 0
+    local hp_max = memInfo.maxhp or 0
+    local key    = memInfo.serverid
+    if not (key and hp_max > 0 and hp_cur > 0 and MemberHasRegen(memInfo.buffs)) then
+        if key then regenTrack[key] = nil end
+        return 0, nil
+    end
+
+    local st = regenTrack[key]
+    if st == nil then
+        st = { last_hp = hp_cur, deltas = {} }
+        regenTrack[key] = st
+    elseif hp_cur > st.last_hp then
+        -- HP went up: record the gain as a regen tick (ignore big jumps,
+        -- which are cures rather than regen ticks).
+        local d = hp_cur - st.last_hp
+        local tickCap = math.max(60, hp_max * 0.12)
+        if d <= tickCap then
+            table.insert(st.deltas, d)
+            while #st.deltas > 5 do table.remove(st.deltas, 1) end
+        end
+        st.last_hp = hp_cur
+    elseif hp_cur < st.last_hp then
+        -- Took damage: reset baseline, keep the learned rate.
+        st.last_hp = hp_cur
+    end
+
+    local avg = nil
+    if #st.deltas > 0 then
+        local s = 0
+        for _, v in ipairs(st.deltas) do s = s + v end
+        avg = s / #st.deltas
+    end
+    if not (avg and avg > 0) then return 0, nil end
+
+    -- Remaining time: exact buff timer for self, tracked cast for others.
+    local ticks = REGEN_GHOST_TICKS
+    local secs  = nil
+    if memIdx == 0 then
+        secs = GetSelfRegenSeconds()
+        if secs == -1 then secs = nil end
+    end
+    if secs == nil then
+        secs = GetTrackedRegenSeconds(key)
+    end
+    if secs and secs > 0 then
+        ticks = math.max(1, math.floor(secs / REGEN_TICK_SECONDS + 0.5))
+    elseif secs == 0 then
+        ticks = 0
+    end
+    if ticks <= 0 then return 0, secs end
+
+    local projHeal = avg * ticks
+    local capped   = math.min(projHeal, hp_max - hp_cur)
+    if capped < 0 then capped = 0 end
+    return capped, secs
+end
+
 -- local backgroundPrim = {};
 local partyWindowPrim = {};
 partyWindowPrim[1] = {
@@ -387,6 +451,9 @@ local function DrawMember(memIdx, settings)
     if (memInfo.inzone) then
         progressbar.ProgressBar({{memInfo.hpp, hpGradient}}, {hpBarWidth, barHeight}, {borderConfig=nil, backgroundGradientOverride=bgGradientOverride, decorate = false});
 
+        -- Project Regen first so the cure ghosts can stack on top of it.
+        local regenAddHp, regenSecs = ComputeRegenProjection(memIdx, memInfo)
+
         ----------------------------------------------------------------
         -- BEGIN HUNTPARTNER CURE GHOST BAR PATCH (re-apply after HXUI update)
         -- Subtle gradient ghost fill showing projected cure amount.
@@ -443,7 +510,11 @@ local function DrawMember(memIdx, settings)
             if skip_name then
                 -- no ghost bar for this member
             elseif hp_max > 0 and hp_cur > 0 and (memInfo.hpp < 1.0 or casting_on_me) then
-                local missing = math.max(1, hp_max - hp_cur)
+                -- Stack cures on top of the Regen floor: project from where
+                -- Regen will have healed to, so the C1/C2 markers show the
+                -- COMBINED result and you can avoid over-curing.
+                local eff_hp  = math.min(hp_max, hp_cur + (regenAddHp or 0))
+                local missing = math.max(1, hp_max - eff_hp)
                 local dl
                 pcall(function() dl = imgui.GetWindowDrawList() end)
                 if dl then
@@ -457,9 +528,9 @@ local function DrawMember(memIdx, settings)
                     local rec_heal = (rec_tier == 1) and heal1 or heal2
                     local alt_heal = (alt_tier == 1) and heal1 or heal2
 
-                    local cur_frac = hp_cur / hp_max
-                    local rec_proj = math.min(1.0, (hp_cur + rec_heal) / hp_max)
-                    local alt_proj = math.min(1.0, (hp_cur + alt_heal) / hp_max)
+                    local cur_frac = eff_hp / hp_max
+                    local rec_proj = math.min(1.0, (eff_hp + rec_heal) / hp_max)
+                    local alt_proj = math.min(1.0, (eff_hp + alt_heal) / hp_max)
                     local start_x = hpStartX + hpBarWidth * cur_frac
                     local rec_end = hpStartX + hpBarWidth * rec_proj
                     local alt_end = hpStartX + hpBarWidth * alt_proj
@@ -476,7 +547,7 @@ local function DrawMember(memIdx, settings)
                         show_heal = (casting_tier == 1) and heal1 or heal2
                         show_tier = casting_tier
                         -- Recalculate projection for the actual casting tier
-                        rec_proj = math.min(1.0, (hp_cur + show_heal) / hp_max)
+                        rec_proj = math.min(1.0, (eff_hp + show_heal) / hp_max)
                         rec_end = hpStartX + hpBarWidth * rec_proj
                     end
 
@@ -557,102 +628,43 @@ local function DrawMember(memIdx, settings)
         do
             local hp_cur = memInfo.hp or 0
             local hp_max = memInfo.maxhp or 0
-            local key    = memInfo.serverid
-            if key and hp_max > 0 and hp_cur > 0 and MemberHasRegen(memInfo.buffs) then
-                local st = regenTrack[key]
-                if st == nil then
-                    st = { last_hp = hp_cur, deltas = {} }
-                    regenTrack[key] = st
-                elseif hp_cur > st.last_hp then
-                    -- HP went up: record the gain as a regen tick (ignore big
-                    -- jumps, which are cures rather than regen ticks).
-                    local d = hp_cur - st.last_hp
-                    local tickCap = math.max(60, hp_max * 0.12)
-                    if d <= tickCap then
-                        table.insert(st.deltas, d)
-                        while #st.deltas > 5 do table.remove(st.deltas, 1) end
-                    end
-                    st.last_hp = hp_cur
-                elseif hp_cur < st.last_hp then
-                    -- Took damage: reset baseline, keep the learned rate.
-                    st.last_hp = hp_cur
-                end
-
-                local avg = nil
-                if #st.deltas > 0 then
-                    local s = 0
-                    for _, v in ipairs(st.deltas) do s = s + v end
-                    avg = s / #st.deltas
-                end
-
-                if avg and avg > 0 and memInfo.hpp < 1.0 then
-                    local dl
-                    pcall(function() dl = imgui.GetWindowDrawList() end)
-                    if dl then
-                        -- For self, project the FULL remaining regen based on
-                        -- the buff's real time left (ticks shrink each tick).
-                        -- For other members, fall back to a fixed look-ahead.
-                        local ticks  = REGEN_GHOST_TICKS
-                        local secs   = nil
-                        if memIdx == 0 then
-                            -- Self: exact remaining time from the buff timer.
-                            secs = GetSelfRegenSeconds()
-                            if secs == -1 then secs = nil end
+            if regenAddHp and regenAddHp > 0 and hp_max > 0 and hp_cur > 0 then
+                local dl
+                pcall(function() dl = imgui.GetWindowDrawList() end)
+                if dl then
+                    local cur_frac = hp_cur / hp_max
+                    local proj     = math.min(1.0, (hp_cur + regenAddHp) / hp_max)
+                    local start_x  = hpStartX + hpBarWidth * cur_frac
+                    local end_x    = hpStartX + hpBarWidth * proj
+                    local inset    = 2
+                    if end_x > start_x + 1 then
+                        -- Solid green band from current HP to the projected
+                        -- regen floor. Cure (C#) markers are drawn starting at
+                        -- this floor, so they appear AFTER the regen.
+                        dl:AddRectFilled(
+                            { start_x, hpStartY + inset },
+                            { end_x, hpStartY + barHeight - inset },
+                            imgui.GetColorU32({ 0.30, 1.00, 0.40, 0.55 }))
+                        dl:AddLine(
+                            { end_x, hpStartY + inset },
+                            { end_x, hpStartY + barHeight - inset },
+                            imgui.GetColorU32({ 0.75, 1.00, 0.80, 1.00 }), 2.0)
+                        local label
+                        if regenSecs and regenSecs > 0 then
+                            label = ('R+%d (%ds)'):format(math.floor(regenAddHp + 0.5), regenSecs)
+                        else
+                            label = ('R+%d'):format(math.floor(regenAddHp + 0.5))
                         end
-                        if secs == nil then
-                            -- Anyone else (or self fallback): use the Regen
-                            -- cast we caught from the action-packet stream.
-                            secs = GetTrackedRegenSeconds(key)
-                        end
-                        if secs and secs > 0 then
-                            ticks = math.max(1, math.floor(secs / REGEN_TICK_SECONDS + 0.5))
-                        elseif secs == 0 then
-                            ticks = 0
-                        end
-
-                        if ticks > 0 then
-                            local projHeal = avg * ticks
-                            local capped   = math.min(projHeal, hp_max - hp_cur)
-                            local cur_frac = hp_cur / hp_max
-                            local proj     = math.min(1.0, (hp_cur + projHeal) / hp_max)
-                            local start_x  = hpStartX + hpBarWidth * cur_frac
-                            local end_x    = hpStartX + hpBarWidth * proj
-                            local inset    = 2
-                            if end_x > start_x + 1 then
-                                -- Brighter, more solid green so the pending
-                                -- regen heal stands out on a near-full bar.
-                                dl:AddRectFilled(
-                                    { start_x, hpStartY + inset },
-                                    { end_x, hpStartY + barHeight - inset },
-                                    imgui.GetColorU32({ 0.30, 1.00, 0.40, 0.55 }))
-                                dl:AddLine(
-                                    { end_x, hpStartY + inset },
-                                    { end_x, hpStartY + barHeight - inset },
-                                    imgui.GetColorU32({ 0.75, 1.00, 0.80, 1.00 }), 2.0)
-                                local label
-                                if secs and secs > 0 then
-                                    label = ('R+%d (%ds)'):format(math.floor(capped + 0.5), secs)
-                                else
-                                    label = ('R+%d'):format(math.floor(capped + 0.5))
-                                end
-                                -- Draw the label at the TOP of the bar with a
-                                -- dark shadow, so it stays legible and never
-                                -- collides with the cure (C#) label that sits
-                                -- at the bottom of the bar.
-                                local lx = end_x + 3
-                                local ly = hpStartY + 1
-                                dl:AddText({ lx + 1, ly + 1 },
-                                    imgui.GetColorU32({ 0.0, 0.0, 0.0, 0.90 }), label)
-                                dl:AddText({ lx, ly },
-                                    imgui.GetColorU32({ 0.78, 1.00, 0.80, 1.00 }), label)
-                            end
-                        end
+                        -- Label at the TOP of the bar with a dark shadow so it
+                        -- stays legible and clear of the bottom cure labels.
+                        local lx = start_x + 2
+                        local ly = hpStartY + 1
+                        dl:AddText({ lx + 1, ly + 1 },
+                            imgui.GetColorU32({ 0.0, 0.0, 0.0, 0.90 }), label)
+                        dl:AddText({ lx, ly },
+                            imgui.GetColorU32({ 0.78, 1.00, 0.80, 1.00 }), label)
                     end
                 end
-            elseif key then
-                -- Regen not present: forget learned rate so it recalibrates
-                -- cleanly next time Regen is applied.
-                regenTrack[key] = nil
             end
         end
         ----------------------------------------------------------------
