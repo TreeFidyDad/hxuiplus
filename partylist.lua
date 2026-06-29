@@ -31,6 +31,57 @@ local function MemberHasRegen(buffs)
     return false;
 end
 
+----------------------------------------------------------------
+-- SELF REGEN TIMER (memory-read, borrowed from statustimers)
+-- Reads the real remaining duration of the player's own Regen buff
+-- so the ghost can show the FULL HP regen will restore over its
+-- remaining life (only available for self; party members expose
+-- buff ids but not timers).
+----------------------------------------------------------------
+local REGEN_TICK_SECONDS = 3;          -- regen ticks every 3s
+local INFINITE_DURATION  = 0x7FFFFFFF;
+local regenUtcPtr        = nil;
+local regenUtcInit       = false;
+local function regenEnsureUtcPtr()
+    if not regenUtcInit then
+        regenUtcInit = true;
+        pcall(function()
+            regenUtcPtr = ashita.memory.find('FFXiMain.dll', 0,
+                '8B0D????????8B410C8B49108D04808D04808D04808D04C1C3', 2, 0);
+        end);
+    end
+    return regenUtcPtr;
+end
+-- Remaining seconds on the player's own Regen, or nil if unavailable.
+local function GetSelfRegenSeconds()
+    local ptr = regenEnsureUtcPtr();
+    if ptr == nil or ptr == 0 then return nil; end
+    local secs = nil;
+    pcall(function()
+        local player = AshitaCore:GetMemoryManager():GetPlayer();
+        if player == nil then return; end
+        local icons  = player:GetStatusIcons();
+        local timers = player:GetStatusTimers();
+        if icons == nil or timers == nil then return; end
+        for j = 0, 31 do
+            if icons[j + 1] == REGEN_STATUS_ID then
+                local raw = timers[j + 1];
+                if raw == INFINITE_DURATION then secs = -1; return; end
+                local base = ashita.memory.read_uint32(ptr);
+                base = ashita.memory.read_uint32(base);
+                local nowStamp  = ashita.memory.read_uint32(base + 0x0C);
+                local vanaBase  = 0x3C307D70;
+                local comparand = (nowStamp - vanaBase) * 60;
+                local real = raw - comparand;
+                while real < -2147483648 do real = real + 0xFFFFFFFF; end
+                if real < 1 then secs = 0; else secs = math.ceil(real / 60); end
+                return;
+            end
+        end
+    end);
+    return secs;
+end
+
 -- local backgroundPrim = {};
 local partyWindowPrim = {};
 partyWindowPrim[1] = {
@@ -509,25 +560,48 @@ local function DrawMember(memIdx, settings)
                     local dl
                     pcall(function() dl = imgui.GetWindowDrawList() end)
                     if dl then
-                        local projHeal = avg * REGEN_GHOST_TICKS
-                        local capped   = math.min(projHeal, hp_max - hp_cur)
-                        local cur_frac = hp_cur / hp_max
-                        local proj     = math.min(1.0, (hp_cur + projHeal) / hp_max)
-                        local start_x  = hpStartX + hpBarWidth * cur_frac
-                        local end_x    = hpStartX + hpBarWidth * proj
-                        local inset    = 2
-                        if end_x > start_x + 1 then
-                            dl:AddRectFilled(
-                                { start_x, hpStartY + inset },
-                                { end_x, hpStartY + barHeight - inset },
-                                imgui.GetColorU32({ 0.40, 0.95, 0.45, 0.28 }))
-                            dl:AddLine(
-                                { end_x, hpStartY + inset },
-                                { end_x, hpStartY + barHeight - inset },
-                                imgui.GetColorU32({ 0.55, 1.00, 0.60, 0.85 }), 1.5)
-                            local label = ('R+%d'):format(math.floor(capped + 0.5))
-                            dl:AddText({ end_x + 2, hpStartY + barHeight - 9 },
-                                imgui.GetColorU32({ 0.70, 1.00, 0.72, 0.90 }), label)
+                        -- For self, project the FULL remaining regen based on
+                        -- the buff's real time left (ticks shrink each tick).
+                        -- For other members, fall back to a fixed look-ahead.
+                        local ticks  = REGEN_GHOST_TICKS
+                        local secs   = nil
+                        if memIdx == 0 then
+                            secs = GetSelfRegenSeconds()
+                            if secs == -1 then
+                                secs = nil -- infinite/unknown, keep fallback
+                            elseif secs and secs > 0 then
+                                ticks = math.max(1, math.floor(secs / REGEN_TICK_SECONDS + 0.5))
+                            elseif secs == 0 then
+                                ticks = 0
+                            end
+                        end
+
+                        if ticks > 0 then
+                            local projHeal = avg * ticks
+                            local capped   = math.min(projHeal, hp_max - hp_cur)
+                            local cur_frac = hp_cur / hp_max
+                            local proj     = math.min(1.0, (hp_cur + projHeal) / hp_max)
+                            local start_x  = hpStartX + hpBarWidth * cur_frac
+                            local end_x    = hpStartX + hpBarWidth * proj
+                            local inset    = 2
+                            if end_x > start_x + 1 then
+                                dl:AddRectFilled(
+                                    { start_x, hpStartY + inset },
+                                    { end_x, hpStartY + barHeight - inset },
+                                    imgui.GetColorU32({ 0.40, 0.95, 0.45, 0.28 }))
+                                dl:AddLine(
+                                    { end_x, hpStartY + inset },
+                                    { end_x, hpStartY + barHeight - inset },
+                                    imgui.GetColorU32({ 0.55, 1.00, 0.60, 0.85 }), 1.5)
+                                local label
+                                if memIdx == 0 and secs and secs > 0 then
+                                    label = ('R+%d  %ds'):format(math.floor(capped + 0.5), secs)
+                                else
+                                    label = ('R+%d'):format(math.floor(capped + 0.5))
+                                end
+                                dl:AddText({ end_x + 2, hpStartY + barHeight - 9 },
+                                    imgui.GetColorU32({ 0.70, 1.00, 0.72, 0.90 }), label)
+                            end
                         end
                     end
                 end
