@@ -13,6 +13,24 @@ local fullMenuHeight = {};
 local buffWindowX = {};
 local debuffWindowX = {};
 
+----------------------------------------------------------------
+-- REGEN-GHOST STATE (party bars)
+-- Per-member learning of HP restored by the Regen buff (status 42),
+-- keyed by server id. Drives a green "ghost" preview on each party
+-- HP bar so you can see incoming regen and avoid over-curing.
+----------------------------------------------------------------
+local REGEN_STATUS_ID   = 42;   -- FFXI status effect id for Regen
+local REGEN_GHOST_TICKS = 3;    -- how many regen ticks to project ahead
+local regenTrack = {};          -- [serverid] = { last_hp = n, deltas = {} }
+local function MemberHasRegen(buffs)
+    if buffs == nil or buffs == -1 then return false; end
+    -- Self buffs are 0-indexed, party-member buffs are 1-indexed; scan both.
+    for i = 0, 32 do
+        if buffs[i] == REGEN_STATUS_ID then return true; end
+    end
+    return false;
+end
+
 -- local backgroundPrim = {};
 local partyWindowPrim = {};
 partyWindowPrim[1] = {
@@ -447,6 +465,80 @@ local function DrawMember(memIdx, settings)
         end
         ----------------------------------------------------------------
         -- END HUNTPARTNER CURE GHOST BAR PATCH
+        ----------------------------------------------------------------
+
+        ----------------------------------------------------------------
+        -- BEGIN REGEN GHOST (party bars)
+        -- Green forward preview of HP the Regen buff (status 42) will
+        -- restore over the next few ticks. Per-member rate is learned
+        -- from observed HP gains while Regen is up, so you can tell when
+        -- regen alone will top someone off and skip the cure.
+        ----------------------------------------------------------------
+        do
+            local hp_cur = memInfo.hp or 0
+            local hp_max = memInfo.maxhp or 0
+            local key    = memInfo.serverid
+            if key and hp_max > 0 and hp_cur > 0 and MemberHasRegen(memInfo.buffs) then
+                local st = regenTrack[key]
+                if st == nil then
+                    st = { last_hp = hp_cur, deltas = {} }
+                    regenTrack[key] = st
+                elseif hp_cur > st.last_hp then
+                    -- HP went up: record the gain as a regen tick (ignore big
+                    -- jumps, which are cures rather than regen ticks).
+                    local d = hp_cur - st.last_hp
+                    local tickCap = math.max(60, hp_max * 0.12)
+                    if d <= tickCap then
+                        table.insert(st.deltas, d)
+                        while #st.deltas > 5 do table.remove(st.deltas, 1) end
+                    end
+                    st.last_hp = hp_cur
+                elseif hp_cur < st.last_hp then
+                    -- Took damage: reset baseline, keep the learned rate.
+                    st.last_hp = hp_cur
+                end
+
+                local avg = nil
+                if #st.deltas > 0 then
+                    local s = 0
+                    for _, v in ipairs(st.deltas) do s = s + v end
+                    avg = s / #st.deltas
+                end
+
+                if avg and avg > 0 and memInfo.hpp < 1.0 then
+                    local dl
+                    pcall(function() dl = imgui.GetWindowDrawList() end)
+                    if dl then
+                        local projHeal = avg * REGEN_GHOST_TICKS
+                        local capped   = math.min(projHeal, hp_max - hp_cur)
+                        local cur_frac = hp_cur / hp_max
+                        local proj     = math.min(1.0, (hp_cur + projHeal) / hp_max)
+                        local start_x  = hpStartX + hpBarWidth * cur_frac
+                        local end_x    = hpStartX + hpBarWidth * proj
+                        local inset    = 2
+                        if end_x > start_x + 1 then
+                            dl:AddRectFilled(
+                                { start_x, hpStartY + inset },
+                                { end_x, hpStartY + barHeight - inset },
+                                imgui.GetColorU32({ 0.40, 0.95, 0.45, 0.28 }))
+                            dl:AddLine(
+                                { end_x, hpStartY + inset },
+                                { end_x, hpStartY + barHeight - inset },
+                                imgui.GetColorU32({ 0.55, 1.00, 0.60, 0.85 }), 1.5)
+                            local label = ('R+%d'):format(math.floor(capped + 0.5))
+                            dl:AddText({ end_x + 2, hpStartY + barHeight - 9 },
+                                imgui.GetColorU32({ 0.70, 1.00, 0.72, 0.90 }), label)
+                        end
+                    end
+                end
+            elseif key then
+                -- Regen not present: forget learned rate so it recalibrates
+                -- cleanly next time Regen is applied.
+                regenTrack[key] = nil
+            end
+        end
+        ----------------------------------------------------------------
+        -- END REGEN GHOST (party bars)
         ----------------------------------------------------------------
 
         ----------------------------------------------------------------
