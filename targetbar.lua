@@ -223,6 +223,257 @@ targetbar.DrawWindow = function(settings)
 		local startX, startY = imgui.GetCursorScreenPos();
 		progressbar.ProgressBar(hpPercentData, {settings.barWidth, settings.barHeight}, {decorate = gConfig.showTargetBarBookends});
 
+		----------------------------------------------------------------
+		-- WATNEY HATE DOT
+		-- Top-left corner of target HP bar. Color encodes your hate rank:
+		--   bright pink  = no hate data yet (idle/booting)
+		--   green        = safe (rank 3+)
+		--   amber        = close (rank 2)
+		--   red, pulsing = you have hate (rank 1)
+		-- Same pixel position as the original alive-marker that's been
+		-- confirmed visible in-game. Reusing it eliminates the "is the pip
+		-- being drawn where I can see it" question entirely.
+		----------------------------------------------------------------
+		do
+			local am_dl
+			pcall(function() am_dl = imgui.GetForegroundDrawList() end)
+			if am_dl then
+				local r, g, b = 1.00, 0.20, 0.80  -- default bright pink (no data)
+				local pulse = 1.0
+				local rank_text = 'init'
+
+				-- File-based IPC: Ashita4 sandboxes _G per addon so cross-
+				-- addon getters via _G.HuntPartner* return nil to other
+				-- addons. We read huntpartner's hate-state.dat directly,
+				-- cached for ~0.25s per addon-frame to avoid disk thrash.
+				local ok_io, info = pcall(function()
+					local now = os.clock()
+					if not _watney_hate_cache or (now - _watney_hate_cache.t) > 0.25 then
+						local path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\hate-state.dat'
+						local f = io.open(path, 'r')
+						if not f then
+							_watney_hate_cache = { t = now, info = nil }
+						else
+							local data = f:read('*a')
+							f:close()
+							local target = tonumber(data:match('TARGET=([%-%d]+)'))
+							local mypos_str = data:match('MY_POS=([%w%-]+)')
+							local total = tonumber(data:match('TOTAL=(%d+)'))
+							local my_score = tonumber(data:match('MY_SCORE=([%d%.]+)'))
+							local leader_score = tonumber(data:match('LEADER_SCORE=([%d%.]+)'))
+							local ts = tonumber(data:match('TIMESTAMP=([%d%.]+)'))
+							local my_pos = (mypos_str ~= 'nil') and tonumber(mypos_str) or nil
+							_watney_hate_cache = { t = now, info = {
+								target = target or 0,
+								my_pos = my_pos,
+								total = total or 0,
+								my_score = my_score or 0,
+								leader_score = leader_score or 0,
+								next_nuke_est = tonumber(data:match('NEXT_NUKE_EST=(%d+)')) or 0,
+								mob_claim_id = tonumber(data:match('MOB_CLAIM_ID=(%d+)')) or 0,
+								mob_target_is_me = data:match('MOB_TARGET_IS_ME=true') ~= nil,
+								calibrated_threshold = tonumber(data:match('CALIBRATED_THRESHOLD=([%d%.]+)')),
+								calib_samples = tonumber(data:match('CALIB_SAMPLES=(%d+)')) or 0,
+								ts = ts or 0,
+							}}
+						end
+					end
+					return _watney_hate_cache.info
+				end)
+
+				if not ok_io then
+					rank_text = nil
+				elseif not info then
+					rank_text = nil
+				elseif info.total == 0 then
+					rank_text = nil
+				elseif info.my_pos == nil then
+					rank_text = nil
+				else
+					-- Ground-truth override: the mob's actual claim/target
+					-- from game memory. If the mob is targeting us right now,
+					-- we have hate -- no simulation involved, no questions.
+					local has_hate_truth = info.mob_target_is_me
+					local rank = (info.my_pos or 0) + 1
+					local ratio = (info.leader_score > 0) and (info.my_score / info.leader_score) or 0
+					local pct = math.floor(ratio * 100)
+					local projected_score = info.my_score + info.next_nuke_est
+					local proj_ratio = (info.leader_score > 0) and (projected_score / info.leader_score) or ratio
+					local proj_pct = math.floor(proj_ratio * 100)
+
+					_watney_hate_cache.prev_state = _watney_hate_cache.prev_state or 'init'
+					_watney_hate_cache.last_safe_t = _watney_hate_cache.last_safe_t or 0
+
+					local cur_state
+					-- Use learned threshold if we have enough samples, else
+					-- conservative 70% default. The learned value reflects the
+					-- ratio at which Blake ACTUALLY pulls hate in this comp.
+					local steal_thresh = info.calibrated_threshold or 0.70
+					local climb_thresh = steal_thresh * 0.6   -- yellow zone starts at 60% of steal
+					if has_hate_truth then cur_state = 'holding'  -- ground truth wins
+					elseif rank == 1 then cur_state = 'holding'
+					elseif ratio >= steal_thresh then cur_state = 'steal'
+					elseif proj_ratio >= steal_thresh then cur_state = 'predict'
+					elseif ratio >= climb_thresh then cur_state = 'climb'
+					else cur_state = 'safe' end
+
+					local was_dangerous = (_watney_hate_cache.prev_state == 'holding'
+					                    or _watney_hate_cache.prev_state == 'steal'
+					                    or _watney_hate_cache.prev_state == 'predict')
+					local now_safer = (cur_state == 'climb' or cur_state == 'safe')
+					if was_dangerous and now_safer then
+						_watney_hate_cache.last_safe_t = currentTime
+					end
+					_watney_hate_cache.prev_state = cur_state
+					local safe_flash_age = currentTime - _watney_hate_cache.last_safe_t
+					local in_safe_flash = safe_flash_age < 1.5 and _watney_hate_cache.last_safe_t > 0
+
+					if cur_state == 'holding' then
+						-- Use a HATE! prefix when ground-truth confirms, else
+						-- show simulator-derived #1 ranking text. The visual is
+						-- the same red pulse either way; the text tells you
+						-- whether it's confirmed or estimated.
+						if has_hate_truth then
+							rank_text = 'HATE! mob is on you'
+						else
+							rank_text = string.format('#1/%d HOLDING (100%%)', info.total)
+						end
+						r, g, b = 1.00, 0.20, 0.18
+						pulse = 0.55 + 0.45 * (0.5 + 0.5 * math.sin(currentTime * 5.0))
+					elseif cur_state == 'steal' then
+						rank_text = string.format('#%d/%d STEAL (%d%%)', rank, info.total, pct)
+						r, g, b = 1.00, 0.55, 0.20
+						pulse = 0.60 + 0.40 * (0.5 + 0.5 * math.sin(currentTime * 3.5))
+					elseif cur_state == 'predict' then
+						rank_text = string.format('#%d/%d (%d%% next=%d%%)', rank, info.total, pct, proj_pct)
+						r, g, b = 1.00, 0.70, 0.30
+						pulse = 0.70 + 0.30 * (0.5 + 0.5 * math.sin(currentTime * 2.5))
+					elseif in_safe_flash then
+						local fade = 1.0 - (safe_flash_age / 1.5)
+						rank_text = string.format('#%d/%d RESUME OK (%d%%)', rank, info.total, pct)
+						r, g, b = 0.30, 1.00, 0.40
+						pulse = 0.7 + 0.3 * fade
+					elseif cur_state == 'climb' then
+						rank_text = string.format('#%d/%d (%d%% next=%d%%)', rank, info.total, pct, proj_pct)
+						r, g, b = 1.00, 0.85, 0.30
+					else
+						rank_text = string.format('#%d/%d (%d%%)', rank, info.total, pct)
+						r, g, b = 0.45, 0.95, 0.55
+					end
+				end
+
+				if rank_text then
+					local size = 14
+					local pad = 2
+					am_dl:AddRectFilled(
+						{ startX - size - pad, startY - size - pad },
+						{ startX - pad,        startY - pad },
+						imgui.GetColorU32({ r, g, b, pulse }), 2.0, 0)
+				end
+			end
+		end
+		----------------------------------------------------------------
+		----------------------------------------------------------------
+		-- BEGIN HUNTPARTNER HATE-PIP PATCH (target HP bar)
+		-- Tiny rank badge on the top-right corner of the target HP bar
+		-- showing your position on the mob's hate list (#1/4 style).
+		-- Color-coded: green=safe, amber=close, red=you have hate.
+		-- Reads _G.HuntPartnerGetHateData(); silently no-ops if huntpartner
+		-- isn't loaded OR the server hasn't sent 0x076 yet.
+		----------------------------------------------------------------
+		if _G.HuntPartnerGetHateData then
+			local hd = _G.HuntPartnerGetHateData();
+			if hd and hd.total and hd.total > 0 and hd.my_position ~= nil then
+				local rank      = hd.my_position + 1;  -- 0-indexed -> 1-indexed display
+				local total     = hd.total;
+				local pip_text  = string.format('#%d/%d', rank, total);
+				local r, g, b
+				if rank == 1 then       r, g, b = 1.00, 0.30, 0.25  -- red: you have hate
+				elseif rank == 2 then   r, g, b = 1.00, 0.78, 0.20  -- amber: close
+				else                    r, g, b = 0.45, 0.95, 0.55  -- green: safe
+				end
+				local pip_dl
+				pcall(function() pip_dl = imgui.GetForegroundDrawList() end)
+				if pip_dl then
+					-- Small colored dot indicator (no text)
+					local dot_size = 8
+					local dx = startX - dot_size - 4
+					local dy = startY + math.floor(settings.barHeight / 2) - math.floor(dot_size / 2)
+					pip_dl:AddRectFilled({ dx, dy }, { dx + dot_size, dy + dot_size },
+						imgui.GetColorU32({ r, g, b, 0.9 }), 2.0, 0)
+				end
+			end
+		end
+		----------------------------------------------------------------
+		-- END HUNTPARTNER HATE-PIP PATCH
+		----------------------------------------------------------------
+
+		----------------------------------------------------------------
+		-- BEGIN HUNTPARTNER SWING-TIMER PATCH (target HP bar)
+		-- Reads per-mob swing prediction from huntpartner's persisted
+		-- learning via _G.HuntPartnerGetSwingData(name, level). If
+		-- huntpartner isn't loaded, this block silently no-ops.
+		-- Renders a thin cyan->yellow->red marching strip immediately
+		-- under the target HP bar, with white flash for ~0.18s after
+		-- each landed swing (gives a rhythm tool at a glance).
+		----------------------------------------------------------------
+		if _G.HuntPartnerGetSwingData and isMonster then
+			-- Target level isn't always known to hxuiplus; pass nil and
+			-- let huntpartner's name-only fallback resolve it.
+			local sd = _G.HuntPartnerGetSwingData(targetEntity.Name, nil);
+			if sd and targetEntity.HPPercent > 0 then
+				local sw_int  = sd.swing_interval;
+				local elapsed = currentTime - sd.last_hit_c;
+				if elapsed >= 0 and elapsed <= sw_int * 2.0 then
+					local frac    = math.min(elapsed / sw_int, 1.0);
+					local strip_h = math.max(3, math.floor(settings.barHeight * 0.18));
+					local gap     = 1;
+					local sw_x0   = startX;
+					local sw_y0   = startY + settings.barHeight + gap;
+					local sw_x1   = sw_x0 + settings.barWidth;
+					local sw_y1   = sw_y0 + strip_h;
+					local dl;
+					pcall(function() dl = imgui.GetForegroundDrawList() end);
+					if not dl then pcall(function() dl = imgui.GetWindowDrawList() end); end
+					if dl then
+						-- Backdrop.
+						dl:AddRectFilled({ sw_x0, sw_y0 }, { sw_x1, sw_y1 },
+							imgui.GetColorU32({ 0.05, 0.05, 0.08, 0.85 }), 1.0, 0);
+						-- Fill: piecewise lerp cyan -> yellow -> red as frac
+						-- approaches 1.0 (impact). Mirrors huntpartner's
+						-- target-bar swing-strip color flow exactly so the
+						-- visual reads identically across the two addons.
+						local rC, gC, bC;
+						if frac < 0.5 then
+							local t = frac / 0.5;
+							rC = 0.30 + (1.00 - 0.30) * t;
+							gC = 0.80 + (0.90 - 0.80) * t;
+							bC = 1.00 + (0.20 - 1.00) * t;
+						else
+							local t = (frac - 0.5) / 0.5;
+							rC = 1.00;
+							gC = 0.90 + (0.30 - 0.90) * t;
+							bC = 0.20;
+						end
+						local fill_x = sw_x0 + settings.barWidth * frac;
+						dl:AddRectFilled({ sw_x0, sw_y0 }, { fill_x, sw_y1 },
+							imgui.GetColorU32({ rC, gC, bC, 0.95 }), 1.0, 0);
+						-- White flash for ~0.18s after each landed swing
+						-- (the "tick" beat — turns the strip into a real
+						-- rhythm tool you can drum to).
+						if elapsed < 0.18 then
+							local fa = 0.7 * (1.0 - elapsed / 0.18);
+							dl:AddRectFilled({ sw_x0, sw_y0 }, { sw_x1, sw_y1 },
+								imgui.GetColorU32({ 1.0, 1.0, 1.0, fa }), 1.0, 0);
+						end
+					end
+				end
+			end
+		end
+		----------------------------------------------------------------
+		-- END HUNTPARTNER SWING-TIMER PATCH
+		----------------------------------------------------------------
+
 		local nameSize = SIZE.new();
 		nameText:GetTextSize(nameSize);
 

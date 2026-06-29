@@ -126,6 +126,11 @@ T{
 	playerBarScaleX = 1,
 	playerBarScaleY = 1,
 	playerBarFontOffset = 0,
+	playerBarGlobeMode = false,
+	playerBarGlobeScale = 1.0,
+	playerBarGlobeSpacing = 0,
+	swingTimerRadius = 40,
+	swingTimerThickness = 4,
 	showPlayerBarBookends = true,
 	alwaysShowMpBar = true,
     playerBarHideDuringEvents = true,
@@ -153,6 +158,7 @@ T{
     expBarShowText = true,
     expBarShowPercent = true,
     expBarInlineMode = false,
+    expBarSegments = 20,
     expBarLimitPointsMode = true,
 
 	gilTrackerScale = 1,
@@ -373,7 +379,7 @@ T{
 			visible = true,
 			locked = true,
 			font_family = 'Consolas',
-			font_height = 11,
+			font_height = 13,
 			color = 0xFFFFFFFF,
 			bold = true,
 			italic = false;
@@ -390,7 +396,7 @@ T{
 			visible = true,
 			locked = true,
 			font_family = 'Consolas',
-			font_height = 11,
+			font_height = 13,
 			color = 0xFFFFFFFF,
 			bold = true,
 			italic = false;

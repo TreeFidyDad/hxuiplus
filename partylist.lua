@@ -33,7 +33,7 @@ local memberText = {};
 local partyMaxSize = 6;
 local memberTextCount = partyMaxSize * 3;
 
-local borderConfig = {1, '#243e58'};
+local borderConfig = nil;  -- no border for cleaner modern look
 
 local bgImageKeys = { 'bg', 'tl', 'tr', 'br', 'bl' };
 local bgTitleAtlasItemCount = 4;
@@ -173,6 +173,16 @@ local function GetMemberInformation(memIdx)
             local thisIdx = party:GetMemberTargetIndex(memIdx);
             memberInfo.targeted = (t1 == thisIdx and not sActive) or (t2 == thisIdx and sActive);
             memberInfo.subTargeted = (t1 == thisIdx and sActive);
+            -- Distance for cure-range indicator
+            if thisIdx and thisIdx > 0 and memIdx ~= 0 then
+                pcall(function()
+                    local ent = AshitaCore:GetMemoryManager():GetEntity()
+                    local dist_sq = ent:GetDistance(thisIdx)
+                    if dist_sq and dist_sq > 0 then
+                        memberInfo.distance = math.sqrt(dist_sq)
+                    end
+                end)
+            end
         else
             memberInfo.targeted = false;
             memberInfo.subTargeted = false;
@@ -243,7 +253,7 @@ local function DrawMember(memIdx, settings)
     -- Get the hp color for bars and text
     local hpNameColor, hpGradient = GetHpColors(memInfo.hpp);
 
-    local bgGradientOverride = {'#000813', '#000813'};
+    local bgGradientOverride = {'#0a0f1a', '#101825'};
 
     local hpBarWidth = settings.hpBarWidth * scale.x;
     local mpBarWidth = settings.mpBarWidth * scale.x;
@@ -277,48 +287,342 @@ local function DrawMember(memIdx, settings)
 
     -- Draw the HP bar
     if (memInfo.inzone) then
-        progressbar.ProgressBar({{memInfo.hpp, hpGradient}}, {hpBarWidth, barHeight}, {borderConfig=borderConfig, backgroundGradientOverride=bgGradientOverride, decorate = gConfig.showPartyListBookends});
+        progressbar.ProgressBar({{memInfo.hpp, hpGradient}}, {hpBarWidth, barHeight}, {borderConfig=nil, backgroundGradientOverride=bgGradientOverride, decorate = false});
 
         ----------------------------------------------------------------
-        -- BEGIN HUNTPARTNER CURE-WASTE PATCH (re-apply after HXUI update)
-        -- Adds Cure I (thin) and Cure II (thick) tick marks on the HP bar
-        -- at projected post-heal positions. Green = clean, amber = some
-        -- waste, red = mostly wasted. Baseline heal values; doesn't learn.
-        -- Block bounded by BEGIN/END markers for easy re-application.
+        -- BEGIN HUNTPARTNER CURE GHOST BAR PATCH (re-apply after HXUI update)
+        -- Subtle gradient ghost fill showing projected cure amount.
+        -- Fades from left to right for a soft look. Slightly brighter
+        -- edge-line at the projected endpoint. No chunky rectangles.
         ----------------------------------------------------------------
         do
-            local HP_CURE_HEAL = { [1]=40, [2]=135, [3]=270, [4]=500, [5]=800, [6]=1100 }
             local hp_cur = memInfo.hp or 0
             local hp_max = memInfo.maxhp or 0
-            if hp_max > 0 and hp_cur > 0 and memInfo.hpp < 1.0 then
-                local missing = hp_max - hp_cur
+            local is_mp_user = (memInfo.maxmp or 0) > 0
+
+            -- Read file-based IPC from HuntPartner (cross-addon safe)
+            local casting_on_me = false
+            local casting_tier = nil
+            local now = os.clock()
+            pcall(function()
+                local ipc_path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\cast_ipc.txt'
+                local f = io.open(ipc_path, 'r')
+                if f then
+                    local data = f:read('*a')
+                    f:close()
+                    if data and #data > 0 then
+                        local tgt, tier_s, ts_s = data:match('^(.-)%|(%d+)%|(%d+)$')
+                        if tgt and tgt == memInfo.name then
+                            local ts = tonumber(ts_s) or 0
+                            if (os.time() - ts) <= 8 then
+                                casting_on_me = true
+                                casting_tier = tonumber(tier_s)
+                            end
+                        end
+                    end
+                end
+            end)
+
+            -- Read learned heal amounts from file
+            local heal1, heal2 = 30, 120
+            pcall(function()
+                local heals_path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\heals_ipc.txt'
+                local f = io.open(heals_path, 'r')
+                if f then
+                    for line in f:lines() do
+                        local t, v = line:match('^(%d+)%|(%d+)$')
+                        if t == '1' and tonumber(v) > 0 then heal1 = tonumber(v) end
+                        if t == '2' and tonumber(v) > 0 then heal2 = tonumber(v) end
+                    end
+                    f:close()
+                end
+            end)
+
+            -- Read skip config from file (fallback: no skips)
+            local skip_name = false
+
+            -- Show ghost bar if member is missing HP OR if we're casting on them
+            if skip_name then
+                -- no ghost bar for this member
+            elseif hp_max > 0 and hp_cur > 0 and (memInfo.hpp < 1.0 or casting_on_me) then
+                local missing = math.max(1, hp_max - hp_cur)
                 local dl
                 pcall(function() dl = imgui.GetWindowDrawList() end)
                 if dl then
-                    local function tick_color(raw)
-                        local waste = math.max(0, raw - missing)
-                        local frac_waste = (raw > 0) and (waste / raw) or 0
-                        if frac_waste >= 0.5 then return { 1.00, 0.45, 0.45, 0.95 } end
-                        if waste >= 30        then return { 1.00, 0.82, 0.35, 0.95 } end
-                        return { 0.55, 0.95, 0.55, 0.95 }
+
+                    local rec_tier, alt_tier
+                    if heal1 >= missing * 0.8 then
+                        rec_tier = 1; alt_tier = 2
+                    else
+                        rec_tier = 2; alt_tier = 1
                     end
-                    local function draw_cure_tick(tier, thickness)
-                        local raw = HP_CURE_HEAL[tier]
-                        if not raw then return end
-                        local projected = math.min(1.0, (hp_cur + raw) / hp_max)
-                        local tx = hpStartX + hpBarWidth * projected
-                        local col = imgui.GetColorU32(tick_color(raw))
-                        dl:AddLine({ tx, hpStartY + 1 },
-                                   { tx, hpStartY + barHeight - 1 },
-                                   col, thickness)
+                    local rec_heal = (rec_tier == 1) and heal1 or heal2
+                    local alt_heal = (alt_tier == 1) and heal1 or heal2
+
+                    local cur_frac = hp_cur / hp_max
+                    local rec_proj = math.min(1.0, (hp_cur + rec_heal) / hp_max)
+                    local alt_proj = math.min(1.0, (hp_cur + alt_heal) / hp_max)
+                    local start_x = hpStartX + hpBarWidth * cur_frac
+                    local rec_end = hpStartX + hpBarWidth * rec_proj
+                    local alt_end = hpStartX + hpBarWidth * alt_proj
+
+                    -- Ghost fill: brighter + pulsing when actively casting on this target
+                    local base_alpha = casting_on_me and (0.55 + 0.25 * math.abs(math.sin(now * 5.0))) or 0.40
+                    local inset = 2
+
+                    -- If actively casting on this target, override fill to show the ACTUAL
+                    -- tier being cast (WoW-style incoming heal preview)
+                    local show_heal = rec_heal
+                    local show_tier = rec_tier
+                    if casting_on_me and casting_tier then
+                        show_heal = (casting_tier == 1) and heal1 or heal2
+                        show_tier = casting_tier
+                        -- Recalculate projection for the actual casting tier
+                        rec_proj = math.min(1.0, (hp_cur + show_heal) / hp_max)
+                        rec_end = hpStartX + hpBarWidth * rec_proj
                     end
-                    draw_cure_tick(1, 2)   -- thin = Cure I
-                    draw_cure_tick(2, 3)   -- thick = Cure II
+
+                    -- Waste calculation for recommended tier
+                    local rec_waste = math.max(0, rec_heal - missing)
+                    local rec_waste_frac = (rec_heal > 0) and (rec_waste / rec_heal) or 0
+                    -- Color: green if efficient, orange if some waste, red if mostly waste
+                    local rec_col
+                    if rec_waste_frac < 0.2 then
+                        rec_col = { 0.3, 1.0, 0.5, 0.8 }   -- green = good
+                    elseif rec_waste_frac < 0.5 then
+                        rec_col = { 1.0, 0.8, 0.2, 0.8 }   -- orange = some waste
+                    else
+                        rec_col = { 1.0, 0.3, 0.2, 0.8 }   -- red = mostly waste
+                    end
+
+                    -- Fill color also shifts with waste
+                    local fill_r = 0.85 * (1.0 - rec_waste_frac) + 1.0 * rec_waste_frac
+                    local fill_g = 0.95 * (1.0 - rec_waste_frac) + 0.4 * rec_waste_frac
+                    local fill_b = 1.0 * (1.0 - rec_waste_frac) + 0.3 * rec_waste_frac
+                    dl:AddRectFilled(
+                        { start_x, hpStartY + inset },
+                        { rec_end, hpStartY + barHeight - inset },
+                        imgui.GetColorU32({ fill_r, fill_g, fill_b, base_alpha }))
+
+                    -- Endpoint line + colored label with heal amount
+                    dl:AddLine(
+                        { rec_end, hpStartY + inset },
+                        { rec_end, hpStartY + barHeight - inset },
+                        imgui.GetColorU32(rec_col), 2)
+                    local rec_label = 'C' .. rec_tier .. ' ' .. rec_heal
+                    dl:AddText({ rec_end + 2, hpStartY + inset - 1 },
+                        imgui.GetColorU32(rec_col), rec_label)
+
+                    -- Alt tier line + label (same waste logic)
+                    if math.abs(alt_proj - rec_proj) > 0.01 then
+                        local alt_waste = math.max(0, alt_heal - missing)
+                        local alt_waste_frac = (alt_heal > 0) and (alt_waste / alt_heal) or 0
+                        local alt_col
+                        if alt_waste_frac < 0.2 then
+                            alt_col = { 0.3, 0.9, 0.5, 0.6 }
+                        elseif alt_waste_frac < 0.5 then
+                            alt_col = { 1.0, 0.75, 0.2, 0.6 }
+                        else
+                            alt_col = { 1.0, 0.3, 0.2, 0.6 }
+                        end
+                        dl:AddLine(
+                            { alt_end, hpStartY + inset },
+                            { alt_end, hpStartY + barHeight - inset },
+                            imgui.GetColorU32(alt_col), 2)
+                        local alt_label = 'C' .. alt_tier .. ' ' .. alt_heal
+                        dl:AddText({ alt_end + 2, hpStartY + inset - 1 },
+                            imgui.GetColorU32(alt_col), alt_label)
+                    end
+
+                    -- CASTING GLOW: pulsing border around the HP bar when healing this target
+                    if casting_on_me then
+                        local glow_alpha = 0.4 + 0.4 * math.abs(math.sin(now * 4.0))
+                        dl:AddRect(
+                            { hpStartX - 1, hpStartY - 1 },
+                            { hpStartX + hpBarWidth + 1, hpStartY + barHeight + 1 },
+                            imgui.GetColorU32({ 0.3, 1.0, 0.6, glow_alpha }), 2, 15, 2)
+                    end
                 end
             end
         end
         ----------------------------------------------------------------
-        -- END HUNTPARTNER CURE-WASTE PATCH
+        -- END HUNTPARTNER CURE GHOST BAR PATCH
+        ----------------------------------------------------------------
+
+        ----------------------------------------------------------------
+        -- BEGIN HUNTPARTNER PREDICTED DAMAGE BAR
+        -- Shows a red ghost region on the HP bar representing predicted
+        -- incoming damage from the current mob (based on learned avg).
+        -- Pulses red when the next swing is imminent.
+        ----------------------------------------------------------------
+        do
+            local now_dmg = os.clock()
+            pcall(function()
+                local dmg_path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\dmg_ipc.txt'
+                local f = io.open(dmg_path, 'r')
+                if f then
+                    local data = f:read('*a')
+                    f:close()
+                    if data and #data > 0 then
+                        local tgt, avg_s, max_s, swing_s, last_s, mob = data:match('^(.-)%|(%d+)%|(%d+)%|([%d%.]+)%|([%d%.]+)%|(.+)$')
+                        if tgt and tgt == memInfo.name then
+                            local avg_dmg = tonumber(avg_s) or 0
+                            local max_dmg = tonumber(max_s) or 0
+                            local swing_int = tonumber(swing_s) or 0
+                            local last_hit = tonumber(last_s) or 0
+                            local hp_cur = memInfo.hp or 0
+                            local hp_max = memInfo.maxhp or 0
+                            -- Expire if no hit for 3 swing cycles (or 15s if no swing data)
+                            -- Also reject negative age (clock mismatch after addon reload)
+                            local stale_limit = (swing_int > 0) and (swing_int * 3) or 15
+                            local age = now_dmg - last_hit
+                            if avg_dmg > 0 and hp_max > 0 and hp_cur > 0 and age >= 0 and age < stale_limit then
+                                local dl_d
+                                pcall(function() dl_d = imgui.GetWindowDrawList() end)
+                                if dl_d then
+                                    local cur_frac = hp_cur / hp_max
+                                    local dmg_frac = avg_dmg / hp_max
+                                    local proj_frac = math.max(0, cur_frac - dmg_frac)
+
+                                    -- How close to next swing? (for pulse intensity)
+                                    local urgency = 0
+                                    if swing_int > 0 and last_hit > 0 then
+                                        local elapsed = now_dmg - last_hit
+                                        local cycle = elapsed / swing_int
+                                        cycle = cycle - math.floor(cycle)
+                                        urgency = cycle  -- 0=just hit, 1=about to hit
+                                    end
+
+                                    -- Red ghost from projected HP down to current HP edge
+                                    local base_a = 0.15 + 0.30 * urgency
+                                    local pulse_a = base_a + 0.15 * math.abs(math.sin(now_dmg * 3.0)) * urgency
+                                    local ghost_start = hpStartX + hpBarWidth * proj_frac
+                                    local ghost_end = hpStartX + hpBarWidth * cur_frac
+                                    local inset_d = 2
+
+                                    if ghost_end > ghost_start + 1 then
+                                        dl_d:AddRectFilled(
+                                            { ghost_start, hpStartY + inset_d },
+                                            { ghost_end, hpStartY + barHeight - inset_d },
+                                            imgui.GetColorU32({ 1.0, 0.2, 0.15, pulse_a }))
+                                        -- Edge line at predicted post-hit HP
+                                        dl_d:AddLine(
+                                            { ghost_start, hpStartY + inset_d },
+                                            { ghost_start, hpStartY + barHeight - inset_d },
+                                            imgui.GetColorU32({ 1.0, 0.3, 0.2, 0.7 }), 2)
+                                        -- Small damage label
+                                        local dmg_label = '-' .. tostring(avg_dmg)
+                                        dl_d:AddText({ ghost_start - 2, hpStartY - 10 },
+                                            imgui.GetColorU32({ 1.0, 0.4, 0.3, 0.6 + 0.3 * urgency }), dmg_label)
+                                    end
+                                end
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+        ----------------------------------------------------------------
+        -- END HUNTPARTNER PREDICTED DAMAGE BAR
+        ----------------------------------------------------------------
+
+        ----------------------------------------------------------------
+        -- HUNTPARTNER CURE-RANGE INDICATOR
+        -- Dims the HP bar and shows a range tag when party member is
+        -- beyond cure range (21 yalms). Subtle fade at 18-21y warning.
+        ----------------------------------------------------------------
+        if memInfo.distance then
+            local CURE_RANGE = 20.9
+            local WARN_RANGE = 17.0
+            if memInfo.distance > WARN_RANGE then
+                local dl_r
+                pcall(function() dl_r = imgui.GetWindowDrawList() end)
+                if dl_r then
+                    local out = memInfo.distance > CURE_RANGE
+                    local alpha = out and 0.45 or (0.25 * ((memInfo.distance - WARN_RANGE) / (CURE_RANGE - WARN_RANGE)))
+                    -- Dark overlay to dim the bar
+                    dl_r:AddRectFilled(
+                        { hpStartX, hpStartY },
+                        { hpStartX + hpBarWidth, hpStartY + barHeight },
+                        imgui.GetColorU32({ 0.0, 0.0, 0.0, alpha }))
+                    -- Range text
+                    if out then
+                        local range_txt = string.format('%.0fy', memInfo.distance)
+                        dl_r:AddText(
+                            { hpStartX + hpBarWidth - 28, hpStartY + 1 },
+                            imgui.GetColorU32({ 1.0, 0.4, 0.3, 0.8 }), range_txt)
+                    end
+                end
+            end
+        end
+        ----------------------------------------------------------------
+
+        ----------------------------------------------------------------
+        -- HUNTPARTNER REST ETA OVERLAY (player only, memIdx == 0)
+        -- Shows "Full in Xm XXs" below the HP bar when resting.
+        ----------------------------------------------------------------
+        if memIdx == 0 then
+            pcall(function()
+                local rest_path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\rest_ipc.txt'
+                local rf = io.open(rest_path, 'r')
+                if rf then
+                    local data = rf:read('*a')
+                    rf:close()
+                    if data and data:sub(1,1) == '1' then
+                        local parts = {}
+                        for p in data:gmatch('[^|]+') do parts[#parts+1] = p end
+                        -- parts: 1=active, 2=hp_avg, 3=mp_avg, 4=hp_tick_eta, 5=mp_tick_eta, 6=hp_full_secs, 7=mp_full_secs, 8=ts
+                        local hp_avg = tonumber(parts[2]) or 0
+                        local mp_avg = tonumber(parts[3]) or 0
+                        local hp_tick_eta = tonumber(parts[4]) or 0
+                        local mp_tick_eta = tonumber(parts[5]) or 0
+                        local hp_full = tonumber(parts[6]) or 0
+                        local mp_full = tonumber(parts[7]) or 0
+                        local ipc_ts = tonumber(parts[8]) or 0
+                        -- Only show if IPC is fresh (within 2s)
+                        local age = os.clock() - ipc_ts
+                        if age < 2.0 then
+                            local dl = imgui.GetForegroundDrawList()
+                            local text_y = hpStartY + barHeight + 2
+                            local text_x = hpStartX
+                            -- Format HP full time
+                            local function fmt_secs(s)
+                                if s <= 0 then return 'FULL' end
+                                local m = math.floor(s / 60)
+                                local sec = s % 60
+                                if m > 0 then return string.format('%dm%02ds', m, sec) end
+                                return string.format('%ds', sec)
+                            end
+                            local label = ''
+                            if hp_full > 0 then
+                                label = string.format('+%d HP \xC2\xB7 Full %s \xC2\xB7 tick %.0fs', hp_avg, fmt_secs(hp_full), hp_tick_eta)
+                            elseif hp_avg > 0 then
+                                label = 'HP FULL'
+                            end
+                            if label ~= '' then
+                                -- Draw with shadow
+                                dl:AddText({ text_x + 1, text_y + 1 }, imgui.GetColorU32({ 0, 0, 0, 0.9 }), label)
+                                dl:AddText({ text_x, text_y }, imgui.GetColorU32({ 0.6, 0.95, 0.6, 1.0 }), label)
+                            end
+                            -- MP line if applicable
+                            if mp_avg > 0 then
+                                local mp_label = ''
+                                if mp_full > 0 then
+                                    mp_label = string.format('+%d MP \xC2\xB7 Full %s \xC2\xB7 tick %.0fs', mp_avg, fmt_secs(mp_full), mp_tick_eta)
+                                else
+                                    mp_label = 'MP FULL'
+                                end
+                                local mp_y = text_y + 14
+                                dl:AddText({ text_x + 1, mp_y + 1 }, imgui.GetColorU32({ 0, 0, 0, 0.9 }), mp_label)
+                                dl:AddText({ text_x, mp_y }, imgui.GetColorU32({ 0.6, 0.85, 0.95, 1.0 }), mp_label)
+                            end
+                        end
+                    end
+                end
+            end)
+        end
+        ----------------------------------------------------------------
+        -- END HUNTPARTNER REST ETA
         ----------------------------------------------------------------
 
     elseif (memInfo.zone == '' or memInfo.zone == nil) then
@@ -349,7 +653,7 @@ local function DrawMember(memIdx, settings)
         local mpStartX, mpStartY;
         imgui.SetCursorPosX(imgui.GetCursorPosX());
         mpStartX, mpStartY = imgui.GetCursorScreenPos();
-        progressbar.ProgressBar({{memInfo.mpp, {'#3a7fc4', '#6ba8e0'}}}, {mpBarWidth, barHeight}, {borderConfig=borderConfig, backgroundGradientOverride=bgGradientOverride, decorate = gConfig.showPartyListBookends});
+        progressbar.ProgressBar({{memInfo.mpp, {'#2563eb', '#60a5fa'}}}, {mpBarWidth, barHeight}, {borderConfig=nil, backgroundGradientOverride=bgGradientOverride, decorate = false});
 
         -- Update the mp text
         memberText[memIdx].mp:SetColor(gAdjustedSettings.mpColor);
@@ -377,7 +681,7 @@ local function DrawMember(memIdx, settings)
                 mainPercent = memInfo.tp / 1000;
             end
             
-            progressbar.ProgressBar({{mainPercent, tpGradient}}, {tpBarWidth, barHeight}, {overlayBar=tpOverlay, borderConfig=borderConfig, backgroundGradientOverride=bgGradientOverride, decorate = gConfig.showPartyListBookends});
+            progressbar.ProgressBar({{mainPercent, tpGradient}}, {tpBarWidth, barHeight}, {overlayBar=tpOverlay, borderConfig=nil, backgroundGradientOverride=bgGradientOverride, decorate = false});
 
             -- Update the tp text
             if (memInfo.tp >= 1000) then
@@ -390,7 +694,6 @@ local function DrawMember(memIdx, settings)
             memberText[memIdx].tp:SetText(tostring(memInfo.tp));
         end
 
-        -- Draw targeted
         local entrySize = hpSize.cy + offsetSize + settings.hpTextOffsetY + barHeight + settings.cursorPaddingY1 + settings.cursorPaddingY2;
         if (memInfo.targeted == true) then
             selectionPrim.visible = true;

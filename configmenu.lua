@@ -100,7 +100,7 @@ config.DrawWindow = function(us)
             imgui.EndChild();
         end
         if (imgui.CollapsingHeader("Player Bar")) then
-            imgui.BeginChild("PlayerBarSettings", { 0, 210 }, true);
+            imgui.BeginChild("PlayerBarSettings", { 0, 280 }, true);
             if (imgui.Checkbox('Enabled', { gConfig.showPlayerBar })) then
                 gConfig.showPlayerBar = not gConfig.showPlayerBar;
                 UpdateSettings();
@@ -118,6 +118,21 @@ config.DrawWindow = function(us)
                 UpdateSettings();
             end
             imgui.ShowHelp('Always display the MP Bar even if your current jobs cannot cast spells.'); 
+            if (imgui.Checkbox('Globe Mode (Orbs)', { gConfig.playerBarGlobeMode })) then
+                gConfig.playerBarGlobeMode = not gConfig.playerBarGlobeMode;
+                UpdateSettings();
+            end
+            imgui.ShowHelp('Switch between classic bars and POE2-style orbs.');
+            local globeScale = { gConfig.playerBarGlobeScale or 1.0 };
+            if (imgui.SliderFloat('Globe Size', globeScale, 0.5, 2.5, '%.1f')) then
+                gConfig.playerBarGlobeScale = globeScale[1];
+                UpdateSettings();
+            end
+            local globeSpacing = { gConfig.playerBarGlobeSpacing or 0 };
+            if (imgui.SliderFloat('Globe Spacing', globeSpacing, 0, 300, '%.0f')) then
+                gConfig.playerBarGlobeSpacing = globeSpacing[1];
+                UpdateSettings();
+            end 
             local scaleX = { gConfig.playerBarScaleX };
             if (imgui.SliderFloat('Scale X', scaleX, 0.1, 3.0, '%.1f')) then
                 gConfig.playerBarScaleX = scaleX[1];
@@ -500,6 +515,15 @@ config.DrawWindow = function(us)
             end
             if (imgui.Checkbox('Show Percent', { gConfig.expBarShowPercent })) then
                 gConfig.expBarShowPercent = not gConfig.expBarShowPercent;
+                UpdateSettings();
+            end
+            local segOpts = { 'Off', '5 Segments', '20 Segments' }
+            local segIdx = { 1 }
+            if gConfig.expBarSegments == 5 then segIdx = { 2 }
+            elseif gConfig.expBarSegments == 20 then segIdx = { 3 } end
+            if imgui.Combo('Bar Segments', segIdx, segOpts, #segOpts) then
+                local vals = { 0, 5, 20 }
+                gConfig.expBarSegments = vals[segIdx[1]]
                 UpdateSettings();
             end
             local scaleX = { gConfig.expBarScaleX };

@@ -11,13 +11,13 @@ local progressbar = {
 	bookendFilename = 'bookend',
 
 	-- Background
-	backgroundGradientStartColor = '#01122b',
-	backgroundGradientEndColor = '#061c39',
-	backgroundRounding = 0,
+	backgroundGradientStartColor = '#0a0f1a',
+	backgroundGradientEndColor = '#101825',
+	backgroundRounding = 3,
 
 	-- Foreground
 	foregroundRounding = 3,
-	foregroundPadding = 5,
+	foregroundPadding = 3,
 
 	gradientTextures = {}
 };

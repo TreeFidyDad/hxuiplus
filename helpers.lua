@@ -470,17 +470,17 @@ function GetHpColors(hpPercent)
     local hpNameColor;
     local hpGradient;
     if (hpPercent < .25) then 
-        hpNameColor = 0xFFFF0000;
-        hpGradient = {"#ec3232", "#f16161"};
+        hpNameColor = 0xFFFF4444;
+        hpGradient = {"#c0392b", "#e74c3c"};
     elseif (hpPercent < .50) then;
-        hpNameColor = 0xFFFFA500;
-        hpGradient = {"#ee9c06", "#ecb44e"};
+        hpNameColor = 0xFFFFAA33;
+        hpGradient = {"#d35400", "#e67e22"};
     elseif (hpPercent < .75) then
-        hpNameColor = 0xFFFFFF00;
-        hpGradient = {"#ffff0c", "#ffff97"};
+        hpNameColor = 0xFFEEEE55;
+        hpGradient = {"#b8a024", "#d4c040"};
     else
         hpNameColor = 0xFFFFFFFF;
-        hpGradient = {"#e26c6c", "#fa9c9c"};
+        hpGradient = {"#1a8a5c", "#2ecc71"};
     end
 
     return hpNameColor, hpGradient;
