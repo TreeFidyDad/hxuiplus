@@ -489,7 +489,7 @@ local function DrawMember(memIdx, settings)
             end)
 
             -- Read learned heal amounts from file
-            local heal1, heal2 = 30, 120
+            local heal1, heal2, heal3 = 30, 120, 280
             pcall(function()
                 local heals_path = AshitaCore:GetInstallPath() .. 'addons\\huntpartner\\heals_ipc.txt'
                 local f = io.open(heals_path, 'r')
@@ -498,6 +498,7 @@ local function DrawMember(memIdx, settings)
                         local t, v = line:match('^(%d+)%|(%d+)$')
                         if t == '1' and tonumber(v) > 0 then heal1 = tonumber(v) end
                         if t == '2' and tonumber(v) > 0 then heal2 = tonumber(v) end
+                        if t == '3' and tonumber(v) > 0 then heal3 = tonumber(v) end
                     end
                     f:close()
                 end
@@ -519,52 +520,47 @@ local function DrawMember(memIdx, settings)
                 pcall(function() dl = imgui.GetWindowDrawList() end)
                 if dl then
 
-                    local rec_tier, alt_tier
-                    if heal1 >= missing * 0.8 then
-                        rec_tier = 1; alt_tier = 2
-                    else
-                        rec_tier = 2; alt_tier = 1
+                    -- Available cure tiers (tier number -> learned heal).
+                    local tiers = { {1, heal1}, {2, heal2}, {3, heal3} }
+
+                    -- Recommended = the smallest tier that covers the missing
+                    -- HP (>= 80% of it); if none cover it, the largest tier.
+                    local rec_idx = #tiers
+                    for i = 1, #tiers do
+                        if tiers[i][2] >= missing * 0.8 then rec_idx = i; break end
                     end
-                    local rec_heal = (rec_tier == 1) and heal1 or heal2
-                    local alt_heal = (alt_tier == 1) and heal1 or heal2
+                    local rec_tier = tiers[rec_idx][1]
+                    local rec_heal = tiers[rec_idx][2]
 
                     local cur_frac = eff_hp / hp_max
-                    local rec_proj = math.min(1.0, (eff_hp + rec_heal) / hp_max)
-                    local alt_proj = math.min(1.0, (eff_hp + alt_heal) / hp_max)
-                    local start_x = hpStartX + hpBarWidth * cur_frac
-                    local rec_end = hpStartX + hpBarWidth * rec_proj
-                    local alt_end = hpStartX + hpBarWidth * alt_proj
+                    local start_x  = hpStartX + hpBarWidth * cur_frac
 
                     -- Ghost fill: brighter + pulsing when actively casting on this target
                     local base_alpha = casting_on_me and (0.55 + 0.25 * math.abs(math.sin(now * 5.0))) or 0.40
                     local inset = 2
 
-                    -- If actively casting on this target, override fill to show the ACTUAL
-                    -- tier being cast (WoW-style incoming heal preview)
-                    local show_heal = rec_heal
-                    local show_tier = rec_tier
+                    -- If actively casting on this target, override to show the
+                    -- ACTUAL tier being cast (WoW-style incoming heal preview).
                     if casting_on_me and casting_tier then
-                        show_heal = (casting_tier == 1) and heal1 or heal2
-                        show_tier = casting_tier
-                        -- Recalculate projection for the actual casting tier
-                        rec_proj = math.min(1.0, (eff_hp + show_heal) / hp_max)
-                        rec_end = hpStartX + hpBarWidth * rec_proj
+                        rec_tier = casting_tier
+                        rec_heal = (casting_tier == 1 and heal1)
+                            or (casting_tier == 2 and heal2) or heal3
                     end
 
-                    -- Waste calculation for recommended tier
-                    local rec_waste = math.max(0, rec_heal - missing)
-                    local rec_waste_frac = (rec_heal > 0) and (rec_waste / rec_heal) or 0
-                    -- Color: green if efficient, orange if some waste, red if mostly waste
-                    local rec_col
-                    if rec_waste_frac < 0.2 then
-                        rec_col = { 0.3, 1.0, 0.5, 0.8 }   -- green = good
-                    elseif rec_waste_frac < 0.5 then
-                        rec_col = { 1.0, 0.8, 0.2, 0.8 }   -- orange = some waste
-                    else
-                        rec_col = { 1.0, 0.3, 0.2, 0.8 }   -- red = mostly waste
+                    local rec_proj = math.min(1.0, (eff_hp + rec_heal) / hp_max)
+                    local rec_end  = hpStartX + hpBarWidth * rec_proj
+
+                    -- Waste -> color helper (green good, orange some, red mostly).
+                    local function WasteColor(heal, alpha)
+                        local waste = math.max(0, heal - missing)
+                        local wf = (heal > 0) and (waste / heal) or 0
+                        if wf < 0.2 then return { 0.3, 1.0, 0.5, alpha }
+                        elseif wf < 0.5 then return { 1.0, 0.8, 0.2, alpha }
+                        else return { 1.0, 0.3, 0.2, alpha } end
                     end
 
-                    -- Fill color also shifts with waste
+                    -- Filled recommended bar (fill color also shifts with waste).
+                    local rec_waste_frac = (rec_heal > 0) and (math.max(0, rec_heal - missing) / rec_heal) or 0
                     local fill_r = 0.85 * (1.0 - rec_waste_frac) + 1.0 * rec_waste_frac
                     local fill_g = 0.95 * (1.0 - rec_waste_frac) + 0.4 * rec_waste_frac
                     local fill_b = 1.0 * (1.0 - rec_waste_frac) + 0.3 * rec_waste_frac
@@ -573,34 +569,38 @@ local function DrawMember(memIdx, settings)
                         { rec_end, hpStartY + barHeight - inset },
                         imgui.GetColorU32({ fill_r, fill_g, fill_b, base_alpha }))
 
-                    -- Endpoint line + colored label with heal amount
+                    -- Recommended endpoint line + label.
+                    local rec_col = WasteColor(rec_heal, 0.8)
                     dl:AddLine(
                         { rec_end, hpStartY + inset },
                         { rec_end, hpStartY + barHeight - inset },
                         imgui.GetColorU32(rec_col), 2)
-                    local rec_label = 'C' .. rec_tier .. ' ' .. rec_heal
                     dl:AddText({ rec_end + 2, hpStartY + inset - 1 },
-                        imgui.GetColorU32(rec_col), rec_label)
+                        imgui.GetColorU32(rec_col), 'C' .. rec_tier .. ' ' .. rec_heal)
 
-                    -- Alt tier line + label (same waste logic)
-                    if math.abs(alt_proj - rec_proj) > 0.01 then
-                        local alt_waste = math.max(0, alt_heal - missing)
-                        local alt_waste_frac = (alt_heal > 0) and (alt_waste / alt_heal) or 0
-                        local alt_col
-                        if alt_waste_frac < 0.2 then
-                            alt_col = { 0.3, 0.9, 0.5, 0.6 }
-                        elseif alt_waste_frac < 0.5 then
-                            alt_col = { 1.0, 0.75, 0.2, 0.6 }
-                        else
-                            alt_col = { 1.0, 0.3, 0.2, 0.6 }
+                    -- Every other tier as a reference marker line + label, so
+                    -- C1, C2 and C3 are all shown. Labels alternate height to
+                    -- reduce overlap when two tiers land close together.
+                    local stagger = 0
+                    for i = 1, #tiers do
+                        local t_tier = tiers[i][1]
+                        local t_heal = tiers[i][2]
+                        if t_tier ~= rec_tier and t_heal > 0 then
+                            local t_proj = math.min(1.0, (eff_hp + t_heal) / hp_max)
+                            local t_end  = hpStartX + hpBarWidth * t_proj
+                            if math.abs(t_proj - rec_proj) > 0.01 then
+                                local t_col = WasteColor(t_heal, 0.6)
+                                dl:AddLine(
+                                    { t_end, hpStartY + inset },
+                                    { t_end, hpStartY + barHeight - inset },
+                                    imgui.GetColorU32(t_col), 2)
+                                local ly = (stagger % 2 == 0) and (hpStartY + inset - 1)
+                                    or (hpStartY + barHeight - 9)
+                                dl:AddText({ t_end + 2, ly },
+                                    imgui.GetColorU32(t_col), 'C' .. t_tier .. ' ' .. t_heal)
+                                stagger = stagger + 1
+                            end
                         end
-                        dl:AddLine(
-                            { alt_end, hpStartY + inset },
-                            { alt_end, hpStartY + barHeight - inset },
-                            imgui.GetColorU32(alt_col), 2)
-                        local alt_label = 'C' .. alt_tier .. ' ' .. alt_heal
-                        dl:AddText({ alt_end + 2, hpStartY + inset - 1 },
-                            imgui.GetColorU32(alt_col), alt_label)
                     end
 
                     -- CASTING GLOW: pulsing border around the HP bar when healing this target
