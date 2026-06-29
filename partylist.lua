@@ -619,22 +619,32 @@ local function DrawMember(memIdx, settings)
                             local end_x    = hpStartX + hpBarWidth * proj
                             local inset    = 2
                             if end_x > start_x + 1 then
+                                -- Brighter, more solid green so the pending
+                                -- regen heal stands out on a near-full bar.
                                 dl:AddRectFilled(
                                     { start_x, hpStartY + inset },
                                     { end_x, hpStartY + barHeight - inset },
-                                    imgui.GetColorU32({ 0.40, 0.95, 0.45, 0.28 }))
+                                    imgui.GetColorU32({ 0.30, 1.00, 0.40, 0.55 }))
                                 dl:AddLine(
                                     { end_x, hpStartY + inset },
                                     { end_x, hpStartY + barHeight - inset },
-                                    imgui.GetColorU32({ 0.55, 1.00, 0.60, 0.85 }), 1.5)
+                                    imgui.GetColorU32({ 0.75, 1.00, 0.80, 1.00 }), 2.0)
                                 local label
                                 if secs and secs > 0 then
-                                    label = ('R+%d  %ds'):format(math.floor(capped + 0.5), secs)
+                                    label = ('R+%d (%ds)'):format(math.floor(capped + 0.5), secs)
                                 else
                                     label = ('R+%d'):format(math.floor(capped + 0.5))
                                 end
-                                dl:AddText({ end_x + 2, hpStartY + barHeight - 9 },
-                                    imgui.GetColorU32({ 0.70, 1.00, 0.72, 0.90 }), label)
+                                -- Draw the label at the TOP of the bar with a
+                                -- dark shadow, so it stays legible and never
+                                -- collides with the cure (C#) label that sits
+                                -- at the bottom of the bar.
+                                local lx = end_x + 3
+                                local ly = hpStartY + 1
+                                dl:AddText({ lx + 1, ly + 1 },
+                                    imgui.GetColorU32({ 0.0, 0.0, 0.0, 0.90 }), label)
+                                dl:AddText({ lx, ly },
+                                    imgui.GetColorU32({ 0.78, 1.00, 0.80, 1.00 }), label)
                             end
                         end
                     end
